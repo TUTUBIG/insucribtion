@@ -29,6 +29,7 @@ var fraudToken = make(map[int64]string)
 //var tokenTrack = make(map[int64][]string)
 
 const createContractBlock = 18856232
+const endSearchBlock = 18889471
 const step = 500
 const rpcUrl = "https://eth-mainnet.g.alchemy.com/v2/<api key>"
 
@@ -38,7 +39,7 @@ const trimLeft = "0x000000000000000000000000"
 var myABI *abi.ABI
 var abiCaller *aabi.Erc721gpCaller
 var myDB *sql.DB
-var recordbBlock int64
+var recordBlock int64
 
 func main() {
 	db, err := sql.Open("sqlite3", "identifier.sqlite")
@@ -85,13 +86,13 @@ func main() {
 		}
 	}
 
-	recordbBlock = start
+	recordBlock = start
 
 	if _, err := myDB.Exec("DELETE FROM transfers WHERE block_number >= ?", start); err != nil {
 		panic(err)
 	}
 
-	bn := uint64(18889471)
+	bn := uint64(endSearchBlock)
 	end := int64(bn)
 
 	for start < end {
@@ -198,11 +199,11 @@ func findAB(c *ethclient.Client, rc *rpc.Client, from, to *big.Int) {
 	transactions := make(map[string]*types.Transaction)
 	tracesStore := make(map[string][]WrapperAction)
 	for _, l := range logs {
-		if int64(l.BlockNumber) > recordbBlock {
+		if int64(l.BlockNumber) > recordBlock {
 			if _, err := myDB.Exec("UPDATE number SET number = ?", l.BlockNumber); err != nil {
 				panic(err)
 			}
-			recordbBlock = int64(l.BlockNumber)
+			recordBlock = int64(l.BlockNumber)
 		}
 		fa := "0x" + strings.TrimPrefix(l.Topics[1].Hex(), trimLeft)
 		if fa == "0x0000000000000000000000000000000000000000" {
@@ -324,14 +325,14 @@ func findAB(c *ethclient.Client, rc *rpc.Client, from, to *big.Int) {
 				}
 
 				// 3.3 latest approve owner
-				t := int64(l.BlockNumber - 1)
+				t := int64(l.BlockNumber)
 				s := t - step
 				if s < createContractBlock {
 					s = createContractBlock
 				}
 
 				for {
-					approveHash, ownerAddress := getLatestApprove(c, big.NewInt(s), big.NewInt(t), tokenId)
+					approveHash, ownerAddress := getLatestApprove(c, big.NewInt(s), big.NewInt(t), tokenId, l.TxHash.Hex())
 					var trigger string
 					if approveHash != "" {
 						if _, found := tracesStore[approveHash]; !found {
@@ -339,11 +340,11 @@ func findAB(c *ethclient.Client, rc *rpc.Client, from, to *big.Int) {
 						}
 						newTraces := tracesStore[approveHash]
 						for i := range newTraces {
-							if strings.ToLower(traces[i].Action.To) != strings.ToLower(contract) {
+							if strings.ToLower(newTraces[i].Action.To) != strings.ToLower(contract) {
 								continue
 							}
-							if strings.HasPrefix(traces[i].Action.Input, "0x095ea7b3") {
-								inputs, err := myABI.Methods["approve"].Inputs.UnpackValues(hexutil.MustDecode("0x" + strings.TrimPrefix(traces[i].Action.Input, "0x095ea7b3")))
+							if strings.HasPrefix(newTraces[i].Action.Input, "0x095ea7b3") {
+								inputs, err := myABI.Methods["approve"].Inputs.UnpackValues(hexutil.MustDecode("0x" + strings.TrimPrefix(newTraces[i].Action.Input, "0x095ea7b3")))
 								if err != nil {
 									panic(err)
 								}
@@ -362,7 +363,7 @@ func findAB(c *ethclient.Client, rc *rpc.Client, from, to *big.Int) {
 						}
 
 						if strings.ToLower(trigger) != strings.ToLower(ownerAddress) {
-							if _, err := myDB.Exec("UPDATE transfers SET approveHash = ?,isFraud = ? WHERE hash = ?", approveHash, true, l.TxHash.Hex()); err != nil {
+							if _, err := myDB.Exec("UPDATE transfers SET approveHash = ?,isFraud = ? WHERE hash = ? AND tokenId = ?", approveHash, true, l.TxHash.Hex(), tokenId.Int64()); err != nil {
 								panic(err)
 							}
 							fmt.Printf("fraud transaction %s,block number %d, from %s to %s token %d, approve hash %s\n", l.TxHash.Hex(), l.BlockNumber, fa, ta, tokenId, approveHash)
@@ -443,7 +444,7 @@ func getTrace(c *rpc.Client, hash common.Hash) []WrapperAction {
 	return actions
 }
 
-func getLatestApprove(c *ethclient.Client, start, end, tokenId *big.Int) (string, string) {
+func getLatestApprove(c *ethclient.Client, start, end, tokenId *big.Int, transferHash string) (string, string) {
 	fmt.Println("getLatestApprove", tokenId, start, end)
 	q := ethereum.FilterQuery{
 		FromBlock: start,
@@ -459,6 +460,9 @@ func getLatestApprove(c *ethclient.Client, start, end, tokenId *big.Int) (string
 	}
 
 	for i := len(logs) - 1; i >= 0; i-- {
+		if strings.ToLower(logs[i].TxHash.Hex()) == strings.ToLower(transferHash) && logs[i].Topics[2].Hex() == "0x0000000000000000000000000000000000000000000000000000000000000000" {
+			continue
+		}
 		tid, ok := new(big.Int).SetString(logs[i].Topics[3].Hex(), 0)
 		if !ok {
 			panic(logs[i].TxHash.Hex())
