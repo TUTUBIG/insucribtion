@@ -374,7 +374,6 @@ func findAB(c *ethclient.Client, rc *rpc.Client, from, to *big.Int) {
 
 		}
 	}
-
 }
 
 var exchanges = map[string]string{"element": "0x20f780a973856b93f63670377900c1d2a50a77c4", "looksRare": "0x0000000000e655fae4d56241588680f86e3b2377", "openSea": "0x00000000000000adc04c56bf30ac9d3c0aaf14dc", "blur": "0xb2ecfe4e4d61f8790bbb9de2d1259b9e2410cea5"}
@@ -388,7 +387,7 @@ func findInExchangeMarket(address string, traces []WrapperAction) string {
 
 	for i := range traces {
 		if strings.ToLower(traces[i].Action.To) == strings.ToLower(address) {
-			findInExchangeMarket(traces[i].Action.From, traces)
+			return findInExchangeMarket(traces[i].Action.From, traces)
 		}
 	}
 
