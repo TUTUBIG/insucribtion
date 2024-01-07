@@ -28,8 +28,8 @@ var missParseEventError = errors.New("not found event")
 
 const createContractBlock = 18856232
 const endSearchBlock = 18910071
-const step = 500
-const rpcUrl = "https://eth-mainnet.g.alchemy.com/v2/iqxe7N1WGS9PAtAjyWXalovrFIY-T114"
+const step = 100
+const rpcUrl = "https://eth-mainnet.g.alchemy.com/v2/<api key>"
 
 const contract = "0x8c578a6e31fc94b1facd58202be53a8385bacbf7"
 const trimLeft = "0x000000000000000000000000"
@@ -50,7 +50,7 @@ var execution721 = crypto.Keccak256Hash([]byte(`Execution721Packed(bytes32,uint2
 var execution721Maker = crypto.Keccak256Hash([]byte(`Execution721MakerFeePacked(bytes32,uint256,uint256,uint256)`)).Hex()
 
 func main() {
-	db, err := sql.Open("sqlite3", "./fraud.sqlite")
+	db, err := sql.Open("sqlite3", "/Users/alvinliu/Work/personal/insucribtion/fraud.sqlite")
 	if err != nil {
 		panic(err)
 	}
@@ -235,7 +235,7 @@ func findAB(c *ethclient.Client, rc *rpc.Client, from, to *big.Int) {
 				break
 			}
 
-			exchangeMarket = isExchange(traces[i].Action.From)
+			exchangeMarket = findInExchangeMarket(traces[i].Action.From, traces)
 			if exchangeMarket != "" {
 				break
 			} else {
@@ -379,12 +379,19 @@ func findAB(c *ethclient.Client, rc *rpc.Client, from, to *big.Int) {
 
 var exchanges = map[string]string{"element": "0x20f780a973856b93f63670377900c1d2a50a77c4", "looksRare": "0x0000000000e655fae4d56241588680f86e3b2377", "openSea": "0x00000000000000adc04c56bf30ac9d3c0aaf14dc", "blur": "0xb2ecfe4e4d61f8790bbb9de2d1259b9e2410cea5"}
 
-func isExchange(address string) string {
+func findInExchangeMarket(address string, traces []WrapperAction) string {
 	for k, v := range exchanges {
 		if strings.ToLower(v) == strings.ToLower(address) {
 			return k
 		}
 	}
+
+	for i := range traces {
+		if strings.ToLower(traces[i].Action.To) == strings.ToLower(address) {
+			findInExchangeMarket(traces[i].Action.From, traces)
+		}
+	}
+
 	return ""
 }
 
@@ -398,7 +405,7 @@ type Action struct {
 	To    string `json:"to"`
 }
 
-var t = time.NewTicker(300 * time.Millisecond)
+var t = time.NewTicker(50 * time.Millisecond)
 
 func getTrace(c *rpc.Client, hash common.Hash) []WrapperAction {
 
