@@ -96,7 +96,7 @@ func main() {
 
 	recordBlock = start
 
-	if _, err := myDB.Exec("DELETE FROM transfers WHERE block_number >= ?", start); err != nil {
+	if _, err := myDB.Exec("DELETE FROM transfers WHERE block_number = ?", start); err != nil {
 		panic(err)
 	}
 
@@ -113,6 +113,78 @@ func main() {
 	}
 }
 
+func targetTransferTraceIndex(traces []WrapperAction, tokenId int64) int {
+	for i := range traces {
+		if strings.ToLower(traces[i].Action.To) != strings.ToLower(contract) {
+			continue
+		}
+		var tid int64 = -1
+		if strings.HasPrefix(traces[i].Action.Input, "0x23b872dd") {
+			inputs, err := myABI.Methods["transferFrom"].Inputs.Unpack(hexutil.MustDecode("0x" + strings.TrimPrefix(traces[i].Action.Input, "0x23b872dd")))
+			if err != nil {
+				panic(err)
+			}
+
+			id, ok := inputs[2].(*big.Int)
+			if !ok {
+				panic(inputs)
+			}
+
+			tid = id.Int64()
+		}
+		if strings.HasPrefix(traces[i].Action.Input, "0x42842e0e") {
+			inputs, err := myABI.Methods["safeTransferFrom"].Inputs.UnpackValues(hexutil.MustDecode("0x" + strings.TrimPrefix(traces[i].Action.Input, "0x42842e0e")))
+			if err != nil {
+				panic(err)
+			}
+			id, ok := inputs[2].(*big.Int)
+			if !ok {
+				panic(inputs)
+			}
+			tid = id.Int64()
+		}
+		if strings.HasPrefix(traces[i].Action.Input, "0xb88d4fde") {
+			inputs, err := myABI.Methods["safeTransferFrom"].Inputs.UnpackValues(hexutil.MustDecode("0x" + strings.TrimPrefix(traces[i].Action.Input, "0xb88d4fde")))
+			if err != nil {
+				panic(err)
+			}
+			id, ok := inputs[2].(*big.Int)
+			if !ok {
+				panic(inputs)
+			}
+			tid = id.Int64()
+		}
+
+		if tid != tokenId {
+			return i
+		}
+	}
+	return -1
+}
+func targetApproveTraceIndex(traces []WrapperAction, tokenId int64) int {
+	for i := range traces {
+		if strings.ToLower(traces[i].Action.To) != strings.ToLower(contract) {
+			continue
+		}
+		if strings.HasPrefix(traces[i].Action.Input, "0x095ea7b3") {
+			inputs, err := myABI.Methods["approve"].Inputs.UnpackValues(hexutil.MustDecode("0x" + strings.TrimPrefix(traces[i].Action.Input, "0x095ea7b3")))
+			if err != nil {
+				panic(err)
+			}
+
+			id, ok := inputs[1].(*big.Int)
+			if !ok {
+				panic(inputs)
+			}
+			if id.Int64() == tokenId {
+				return i
+			}
+		}
+
+	}
+	return -1
+}
+
 func findAB(c *ethclient.Client, rc *rpc.Client, from, to *big.Int) {
 	q := ethereum.FilterQuery{
 		FromBlock: from,
@@ -127,8 +199,8 @@ func findAB(c *ethclient.Client, rc *rpc.Client, from, to *big.Int) {
 		panic(e)
 	}
 
-	transactions := make(map[string]*types.Transaction)
-	tracesStore := make(map[string][]WrapperAction)
+	transactions := make(map[common.Hash]*types.Transaction)
+	tracesStore := make(map[common.Hash][]WrapperAction)
 	receipts := make(map[common.Hash]*types.Receipt)
 	for _, l := range logs {
 		if int64(l.BlockNumber) > recordBlock {
@@ -154,180 +226,112 @@ func findAB(c *ethclient.Client, rc *rpc.Client, from, to *big.Int) {
 
 		time.Sleep(10 * time.Millisecond)
 
-		if _, found := transactions[l.TxHash.Hex()]; !found {
-			tx, _, err := c.TransactionByHash(context.Background(), l.TxHash)
+		if _, found := tracesStore[l.TxHash]; !found {
+			tracesStore[l.TxHash] = getTrace(rc, l.TxHash)
+		}
+		traces := tracesStore[l.TxHash]
+		index := targetTransferTraceIndex(traces, tokenId.Int64())
+		if index == -1 {
+			if _, e1 := myDB.Exec("UPDATE transfers SET  err = ? WHERE hash = ? AND tokenId = ?", "not found transfer trace", l.TxHash.Hex(), tokenId.Int64()); e1 != nil {
+				panic(e1)
+			}
+			continue
+		}
+		var exchangeMarket string
+		alreadyChecked := make([]string, 0)
+		exchangeMarket = findInExchangeMarket(traces[index].Action.From, alreadyChecked, traces)
+		if exchangeMarket == "" {
+			if _, found := transactions[l.TxHash]; !found {
+				tx, _, err := c.TransactionByHash(context.Background(), l.TxHash)
+				if err != nil {
+					panic(err)
+				}
+				transactions[l.TxHash] = tx
+			}
+
+			tx := transactions[l.TxHash]
+
+			sender, err := types.Sender(types.LatestSignerForChainID(tx.ChainId()), tx)
 			if err != nil {
 				panic(err)
 			}
-			transactions[l.TxHash.Hex()] = tx
-		}
 
-		tx := transactions[l.TxHash.Hex()]
+			owner := getOwner(tokenId, big.NewInt(int64(l.BlockNumber-1)))
 
-		sender, err := types.Sender(types.LatestSignerForChainID(tx.ChainId()), tx)
-		if err != nil {
-			panic(err)
-		}
-
-		owner := getOwner(tokenId, big.NewInt(int64(l.BlockNumber-1)))
-
-		// 1
-		if strings.ToLower(sender.Hex()) == strings.ToLower(owner) {
-			continue
-		}
-
-		// 3 - trace
-		if _, found := tracesStore[tx.Hash().Hex()]; !found {
-			tracesStore[tx.Hash().Hex()] = getTrace(rc, tx.Hash())
-		}
-
-		// 3.1 is from exchange market
-		var exchangeMarket string
-
-		traces := tracesStore[tx.Hash().Hex()]
-
-		for i := range traces {
-			if strings.ToLower(traces[i].Action.To) != strings.ToLower(contract) {
-				continue
-			}
-			var tid int64 = -1
-			if strings.HasPrefix(traces[i].Action.Input, "0x23b872dd") {
-				inputs, err := myABI.Methods["transferFrom"].Inputs.Unpack(hexutil.MustDecode("0x" + strings.TrimPrefix(traces[i].Action.Input, "0x23b872dd")))
-				if err != nil {
-					panic(err)
-				}
-
-				id, ok := inputs[2].(*big.Int)
-				if !ok {
-					panic(inputs)
-				}
-
-				tid = id.Int64()
-			}
-			if strings.HasPrefix(traces[i].Action.Input, "0x42842e0e") {
-				inputs, err := myABI.Methods["safeTransferFrom"].Inputs.UnpackValues(hexutil.MustDecode("0x" + strings.TrimPrefix(traces[i].Action.Input, "0x42842e0e")))
-				if err != nil {
-					panic(err)
-				}
-				id, ok := inputs[2].(*big.Int)
-				if !ok {
-					panic(inputs)
-				}
-				tid = id.Int64()
-			}
-			if strings.HasPrefix(traces[i].Action.Input, "0xb88d4fde") {
-				inputs, err := myABI.Methods["safeTransferFrom"].Inputs.UnpackValues(hexutil.MustDecode("0x" + strings.TrimPrefix(traces[i].Action.Input, "0xb88d4fde")))
-				if err != nil {
-					panic(err)
-				}
-				id, ok := inputs[2].(*big.Int)
-				if !ok {
-					panic(inputs)
-				}
-				tid = id.Int64()
-			}
-
-			if tid != tokenId.Int64() {
+			if strings.ToLower(sender.Hex()) == strings.ToLower(owner) {
 				continue
 			}
 
-			if strings.ToLower(traces[i].Action.From) == strings.ToLower(owner) {
-				break
+			if strings.ToLower(traces[index].Action.From) == strings.ToLower(owner) {
+				continue
 			}
 
-			exchangeMarket = findInExchangeMarket(traces[i].Action.From, traces)
-			if exchangeMarket != "" {
-				break
-			} else {
-				// 3.2
-				isOperator, err := abiCaller.IsApprovedForAll(&bind.CallOpts{
-					BlockNumber: big.NewInt(int64(l.BlockNumber - 1)),
-				}, common.HexToAddress(owner), common.HexToAddress(traces[i].Action.From))
-				if err != nil {
-					panic(err)
-				}
-				if isOperator {
+			isOperator := isApproveAll(c, &l, common.HexToAddress(owner), common.HexToAddress(traces[index].Action.From))
+			if isOperator {
+				continue
+			}
+
+			// 3.3 latest approve owner
+			t := int64(l.BlockNumber)
+			s := t - step
+			if s < createContractBlock {
+				s = createContractBlock
+			}
+
+			for {
+				approveHash, ownerAddress := getLatestApprove(c, big.NewInt(s), big.NewInt(t), tokenId, l.TxHash.Hex())
+				var trigger string
+				if approveHash != "" {
+					if _, found := tracesStore[common.HexToHash(approveHash)]; !found {
+						tracesStore[common.HexToHash(approveHash)] = getTrace(rc, common.HexToHash(approveHash))
+					}
+					newTraces := tracesStore[common.HexToHash(approveHash)]
+					newIndex := targetApproveTraceIndex(newTraces, tokenId.Int64())
+					if newIndex == -1 {
+						if _, e1 := myDB.Exec("UPDATE transfers SET  err = ? WHERE hash = ? AND tokenId = ?", fmt.Sprintf("not found approve trace, approve hash %s", approveHash), l.TxHash.Hex(), tokenId.Int64()); e1 != nil {
+							panic(e1)
+						}
+						continue
+					}
+					trigger = newTraces[newIndex].Action.From
+
+					if strings.ToLower(trigger) != strings.ToLower(ownerAddress) {
+						fmt.Printf("fraud transaction %s,block number %d, from %s to %s token %d, approve hash %s\n", l.TxHash.Hex(), l.BlockNumber, fa, ta, tokenId, approveHash)
+						if _, err := myDB.Exec("UPDATE transfers SET approveHash = ?,isFraud = ?,fraudSender = ?,fraudReceiver = ? WHERE hash = ? AND tokenId = ?", approveHash, true, sender.Hex(), ta, l.TxHash.Hex(), tokenId.Int64()); err != nil {
+							panic(err)
+						}
+					}
 					break
 				}
-
-				// 3.3 latest approve owner
-				t := int64(l.BlockNumber)
-				s := t - step
+				t = s - 1
+				if t <= createContractBlock {
+					break
+				}
+				s = t - step
 				if s < createContractBlock {
 					s = createContractBlock
 				}
+			}
 
-				for {
-					approveHash, ownerAddress := getLatestApprove(c, big.NewInt(s), big.NewInt(t), tokenId, l.TxHash.Hex())
-					var trigger string
-					if approveHash != "" {
-						if _, found := tracesStore[approveHash]; !found {
-							tracesStore[approveHash] = getTrace(rc, common.HexToHash(approveHash))
-						}
-						newTraces := tracesStore[approveHash]
-						for i := range newTraces {
-							if strings.ToLower(newTraces[i].Action.To) != strings.ToLower(contract) {
-								continue
-							}
-							if strings.HasPrefix(newTraces[i].Action.Input, "0x095ea7b3") {
-								inputs, err := myABI.Methods["approve"].Inputs.UnpackValues(hexutil.MustDecode("0x" + strings.TrimPrefix(newTraces[i].Action.Input, "0x095ea7b3")))
-								if err != nil {
-									panic(err)
-								}
-
-								id, ok := inputs[1].(*big.Int)
-								if !ok {
-									panic(inputs)
-								}
-								if id.Int64() != tokenId.Int64() {
-									continue
-								}
-
-								trigger = newTraces[i].Action.From
-								break
-							}
-						}
-
-						if strings.ToLower(trigger) != strings.ToLower(ownerAddress) {
-							if _, err := myDB.Exec("UPDATE transfers SET approveHash = ?,isFraud = ?,fraudSender = ?,fraudReceiver = ? WHERE hash = ? AND tokenId = ?", approveHash, true, sender, to, l.TxHash.Hex(), tokenId.Int64()); err != nil {
-								panic(err)
-							}
-							fmt.Printf("fraud transaction %s,block number %d, from %s to %s token %d, approve hash %s\n", l.TxHash.Hex(), l.BlockNumber, fa, ta, tokenId, approveHash)
-						}
-						break
-					}
-					t = s - 1
-					if t <= createContractBlock {
-						break
-					}
-					s = t - step
-					if s < createContractBlock {
-						s = createContractBlock
-					}
-				}
-
-				if s == createContractBlock {
-					if _, err := myDB.Exec("UPDATE transfers SET isFraud = ? WHERE hash = ? AND tokenId = ?", true, l.TxHash.Hex(), tokenId.Int64()); err != nil {
-						panic(err)
-					}
-					fmt.Printf("not found approved address transaction %s, token %d", l.TxHash.Hex(), tokenId)
+			if s == createContractBlock {
+				fmt.Printf("not found approved address transaction %s, token %d", l.TxHash.Hex(), tokenId)
+				if _, err := myDB.Exec("UPDATE transfers SET isFraud = ?,err = ? WHERE hash = ? AND tokenId = ?", true, "not found approve transaction", l.TxHash.Hex(), tokenId.Int64()); err != nil {
+					panic(err)
 				}
 			}
-		}
-
-		if exchangeMarket != "" {
+		} else {
 			// get price
-			if _, found := receipts[tx.Hash()]; !found {
-				rt, err := c.TransactionReceipt(context.Background(), tx.Hash())
+			if _, found := receipts[l.TxHash]; !found {
+				rt, err := c.TransactionReceipt(context.Background(), l.TxHash)
 				if err != nil {
 					panic(err)
 				}
-				receipts[tx.Hash()] = rt
+				receipts[l.TxHash] = rt
 			}
 
 			switch exchangeMarket {
 			case "element":
-				price, fee, e := findPriceElement(receipts[tx.Hash()], tokenId.Int64())
+				price, fee, e := findPriceElement(receipts[l.TxHash], tokenId.Int64())
 				if e != nil {
 					if _, e1 := myDB.Exec("UPDATE transfers SET  market = 'element',err = ? WHERE hash = ? AND tokenId = ?", e.Error(), l.TxHash.Hex(), tokenId.Int64()); e1 != nil {
 						panic(e1)
@@ -338,7 +342,7 @@ func findAB(c *ethclient.Client, rc *rpc.Client, from, to *big.Int) {
 					}
 				}
 			case "looksRare":
-				price, fee, e := findPriceLR(receipts[tx.Hash()], tokenId.Int64())
+				price, fee, e := findPriceLR(receipts[l.TxHash], tokenId.Int64())
 				if e != nil {
 					if _, e1 := myDB.Exec("UPDATE transfers SET  market = 'looksRare',err = ? WHERE hash = ? AND tokenId = ?", e.Error(), l.TxHash.Hex(), tokenId.Int64()); e1 != nil {
 						panic(e1)
@@ -349,7 +353,7 @@ func findAB(c *ethclient.Client, rc *rpc.Client, from, to *big.Int) {
 					}
 				}
 			case "openSea":
-				price, fee, e := findPriceOpenSea(receipts[tx.Hash()], tokenId.Int64())
+				price, fee, e := findPriceOpenSea(receipts[l.TxHash], tokenId.Int64())
 				if e != nil {
 					if _, e1 := myDB.Exec("UPDATE transfers SET  market = 'openSea',err = ? WHERE hash = ? AND tokenId = ?", e.Error(), l.TxHash.Hex(), tokenId.Int64()); e1 != nil {
 						panic(e1)
@@ -360,7 +364,7 @@ func findAB(c *ethclient.Client, rc *rpc.Client, from, to *big.Int) {
 					}
 				}
 			case "blur":
-				price, fee, e := findPriceBlur(receipts[tx.Hash()], tokenId.Int64())
+				price, fee, e := findPriceBlur(receipts[l.TxHash], tokenId.Int64())
 				if e != nil {
 					if _, e1 := myDB.Exec("UPDATE transfers SET  market = 'blur',err = ? WHERE hash = ? AND tokenId = ?", e.Error(), l.TxHash.Hex(), tokenId.Int64()); e1 != nil {
 						panic(e1)
@@ -378,16 +382,25 @@ func findAB(c *ethclient.Client, rc *rpc.Client, from, to *big.Int) {
 
 var exchanges = map[string]string{"element": "0x20f780a973856b93f63670377900c1d2a50a77c4", "looksRare": "0x0000000000e655fae4d56241588680f86e3b2377", "openSea": "0x00000000000000adc04c56bf30ac9d3c0aaf14dc", "blur": "0xb2ecfe4e4d61f8790bbb9de2d1259b9e2410cea5"}
 
-func findInExchangeMarket(address string, traces []WrapperAction) string {
+func findInExchangeMarket(address string, alreadyChecked []string, traces []WrapperAction) string {
+	time.Sleep(100 * time.Millisecond)
+	fmt.Println("findInExchangeMarket", address)
+	for _, c := range alreadyChecked {
+		if address == c {
+			return ""
+		}
+	}
 	for k, v := range exchanges {
 		if strings.ToLower(v) == strings.ToLower(address) {
 			return k
 		}
 	}
 
+	alreadyChecked = append(alreadyChecked, address)
+
 	for i := range traces {
 		if strings.ToLower(traces[i].Action.To) == strings.ToLower(address) {
-			return findInExchangeMarket(traces[i].Action.From, traces)
+			return findInExchangeMarket(traces[i].Action.From, alreadyChecked, traces)
 		}
 	}
 
@@ -1315,29 +1328,33 @@ func findPriceOpenSea(rt *types.Receipt, tokenId int64) (price *big.Int, totalFe
 	sort.Sort(prices)
 
 	if len(orderFulfilledEvents) == 2 {
-		if len(prices) < 3 {
-			err = fmt.Errorf("wierd opensea transaction")
+		if len(prices) < 2 {
+			err = fmt.Errorf("wierd opensea transaction prices < 2")
 			return
 		}
 
 		fee := new(big.Int)
-		for i := 2; i < len(prices); i++ {
-			fee.Add(fee, prices[i])
+		if len(prices) > 2 {
+			for i := 2; i < len(prices); i++ {
+				fee.Add(fee, prices[i])
+			}
 		}
 		price = prices[0]
 		totalFee = fee
 	} else if len(orderFulfilledEvents) == 1 {
-		if len(prices) < 2 {
-			err = fmt.Errorf("wierd opensea transaction")
+		if len(prices) < 1 {
+			err = fmt.Errorf("wierd opensea transaction prices < 1")
 			return
 		}
 		switch fillType {
 		case "offer":
 			fee := new(big.Int)
 			p := prices[0]
-			for i := 1; i < len(prices); i++ {
-				fee.Add(fee, prices[i])
-				p.Add(p, prices[i])
+			if len(prices) > 1 {
+				for i := 1; i < len(prices); i++ {
+					fee.Add(fee, prices[i])
+					p.Add(p, prices[i])
+				}
 			}
 			totalFee = fee
 			price = p
@@ -1499,4 +1516,41 @@ func findPriceLR(rt *types.Receipt, tokenId int64) (price *big.Int, totalFee *bi
 
 	err = missParseEventError
 	return
+}
+
+func isApproveAll(ec *ethclient.Client, l *types.Log, owner, operator common.Address) bool {
+	isOperator, err := abiCaller.IsApprovedForAll(&bind.CallOpts{
+		BlockNumber: big.NewInt(int64(l.BlockNumber - 1)),
+	}, owner, operator)
+	if err != nil {
+		panic(err)
+	}
+	if isOperator {
+		return true
+	}
+
+	logs, e := ec.FilterLogs(context.Background(), ethereum.FilterQuery{
+		FromBlock: big.NewInt(int64(l.BlockNumber)),
+		ToBlock:   big.NewInt(int64(l.BlockNumber)),
+		Addresses: []common.Address{common.HexToAddress(contract)},
+		Topics: [][]common.Hash{
+			{common.HexToHash("0x17307eab39ab6107e8899845ad3d59bd9653f200f220920489ca2b5937696c31")}, // ApprovalForAll
+		},
+	})
+	if e != nil {
+		panic(e)
+	}
+
+	for i := len(logs) - 1; i >= 0; i-- {
+		if logs[i].Index > l.Index {
+			continue
+		}
+		realOwner, realOperator := logs[i].Topics[1], logs[i].Topics[2]
+		if common.BytesToAddress(realOwner.Bytes()[12:]).Cmp(owner) == 0 && common.BytesToAddress(realOperator.Bytes()[12:]).Cmp(operator) == 0 {
+			return true
+		}
+		return false
+	}
+
+	return isOperator
 }
