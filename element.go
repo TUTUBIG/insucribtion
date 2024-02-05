@@ -10,7 +10,7 @@ import (
 	"strings"
 )
 
-const tx = "0x3eefdb377fdad70618c2e1673f3eb72b1e3ae3de67f25b1a9c5ce17235484979"
+const tx = "0x713f65b5fde3cf29778cf84971bf1f3b055b1c22b144b7221231477dd6af3d14"
 
 func main() {
 	c, e := ethclient.Dial("https://eth-mainnet.g.alchemy.com/v2/iqxe7N1WGS9PAtAjyWXalovrFIY-T114")
@@ -208,7 +208,7 @@ func parseData(topic string, data []byte) {
 		if err != nil {
 			panic(err)
 		}
-	case "":
+	case "0xd90a5c60975c6ff8eafcf02088e7b50ae5d9e156a79206ba553df1c4fb4594c2":
 		err = parsedAbi.UnpackIntoInterface(event, "ERC721BuyOrderFilled", data)
 		if err != nil {
 			panic(err)

@@ -27,7 +27,7 @@ import (
 var missParseEventError = errors.New("not found event")
 
 const createContractBlock = 18856232
-const endSearchBlock = 18910071
+const endSearchBlock = 19146603
 const step = 100
 const rpcUrl = "https://eth-mainnet.g.alchemy.com/v2/<api key>"
 
@@ -40,7 +40,7 @@ var myDB *sql.DB
 var recordBlock int64
 
 var orderFulfilled = "0x9d9af8e38d66c62e2c12f0225249fd9d721c54b83f48d9352c97c6cacdcb6f31"
-var eRC721BuyOrderFilled = crypto.Keccak256Hash([]byte(`ERC721BuyOrderFilled (bytes32 orderHash, address maker, address taker, uint256 nonce, address erc20Token, uint256 erc20TokenAmount, tuple[] fees, address erc721Token, uint256 erc721TokenId)`)).Hex()
+var eRC721BuyOrderFilled = "0xd90a5c60975c6ff8eafcf02088e7b50ae5d9e156a79206ba553df1c4fb4594c2"
 var eRC721SellOrderFilled = "0x9c248aa1a265aa616f707b979d57f4529bb63a4fc34dc7fc61fdddc18410f74e"
 var takerBid = "0x3ee3de4684413690dee6fff1a0a4f92916a1b97d1c5a83cdf24671844306b2e3"
 var takerAsk = "0x9aaa45d6db2ef74ead0751ea9113263d1dec1b50cea05f0ca2002cb8063564a4"
@@ -50,7 +50,7 @@ var execution721 = crypto.Keccak256Hash([]byte(`Execution721Packed(bytes32,uint2
 var execution721Maker = crypto.Keccak256Hash([]byte(`Execution721MakerFeePacked(bytes32,uint256,uint256,uint256)`)).Hex()
 
 func main() {
-	db, err := sql.Open("sqlite3", "/Users/alvinliu/Work/personal/insucribtion/fraud.sqlite")
+	db, err := sql.Open("sqlite3", "/Users/alvinliu/Work/personal/insucribtion/fraud1.sqlite")
 	if err != nil {
 		panic(err)
 	}
@@ -155,7 +155,7 @@ func targetTransferTraceIndex(traces []WrapperAction, tokenId int64) int {
 			tid = id.Int64()
 		}
 
-		if tid != tokenId {
+		if tid == tokenId {
 			return i
 		}
 	}
@@ -288,19 +288,20 @@ func findAB(c *ethclient.Client, rc *rpc.Client, from, to *big.Int) {
 					newTraces := tracesStore[common.HexToHash(approveHash)]
 					newIndex := targetApproveTraceIndex(newTraces, tokenId.Int64())
 					if newIndex == -1 {
-						if _, e1 := myDB.Exec("UPDATE transfers SET  err = ? WHERE hash = ? AND tokenId = ?", fmt.Sprintf("not found approve trace, approve hash %s", approveHash), l.TxHash.Hex(), tokenId.Int64()); e1 != nil {
+						if _, e1 := myDB.Exec("UPDATE transfers SET  err = ?,approveHash = ? WHERE hash = ? AND tokenId = ?", "not found approve trace", approveHash, l.TxHash.Hex(), tokenId.Int64()); e1 != nil {
 							panic(e1)
 						}
-						continue
-					}
-					trigger = newTraces[newIndex].Action.From
+					} else {
+						trigger = newTraces[newIndex].Action.From
 
-					if strings.ToLower(trigger) != strings.ToLower(ownerAddress) {
-						fmt.Printf("fraud transaction %s,block number %d, from %s to %s token %d, approve hash %s\n", l.TxHash.Hex(), l.BlockNumber, fa, ta, tokenId, approveHash)
-						if _, err := myDB.Exec("UPDATE transfers SET approveHash = ?,isFraud = ?,fraudSender = ?,fraudReceiver = ? WHERE hash = ? AND tokenId = ?", approveHash, true, sender.Hex(), ta, l.TxHash.Hex(), tokenId.Int64()); err != nil {
-							panic(err)
+						if strings.ToLower(trigger) != strings.ToLower(ownerAddress) {
+							fmt.Printf("fraud transaction %s,block number %d, from %s to %s token %d, approve hash %s\n", l.TxHash.Hex(), l.BlockNumber, fa, ta, tokenId, approveHash)
+							if _, err := myDB.Exec("UPDATE transfers SET approveHash = ?,isFraud = ?,fraudSender = ?,fraudReceiver = ? WHERE hash = ? AND tokenId = ?", approveHash, true, sender.Hex(), ta, l.TxHash.Hex(), tokenId.Int64()); err != nil {
+								panic(err)
+							}
 						}
 					}
+
 					break
 				}
 				t = s - 1
@@ -383,8 +384,6 @@ func findAB(c *ethclient.Client, rc *rpc.Client, from, to *big.Int) {
 var exchanges = map[string]string{"element": "0x20f780a973856b93f63670377900c1d2a50a77c4", "looksRare": "0x0000000000e655fae4d56241588680f86e3b2377", "openSea": "0x00000000000000adc04c56bf30ac9d3c0aaf14dc", "blur": "0xb2ecfe4e4d61f8790bbb9de2d1259b9e2410cea5"}
 
 func findInExchangeMarket(address string, alreadyChecked []string, traces []WrapperAction) string {
-	time.Sleep(100 * time.Millisecond)
-	fmt.Println("findInExchangeMarket", address)
 	for _, c := range alreadyChecked {
 		if address == c {
 			return ""
